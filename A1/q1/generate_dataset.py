@@ -1,9 +1,9 @@
 import sys
 import random
 
-# -------------------------------
+
 # Argument check
-# -------------------------------
+
 if len(sys.argv) != 3:
     print("Usage: python generate_dataset.py <num_items> <num_transactions>")
     sys.exit(1)
@@ -13,7 +13,7 @@ NUM_TRANS = int(sys.argv[2])
 
 random.seed(42)
 
-# -------------------------------
+
 # Create universal itemset
 
 items = [f"i{i}" for i in range(NUM_ITEMS)]
