@@ -1,0 +1,5 @@
+venv/
+out/
+out_gen/
+__pycache__/
+*.zip
