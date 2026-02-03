@@ -24,7 +24,7 @@ def run_algorithm(algo_name, executable, input_file, support_percent, output_dir
             with open(output_file, 'w') as f:
                 result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, timeout=300)
         except subprocess.TimeoutExpired:
-            print(f"    TIMEOUT: gSpan exceeded 5 minutes", flush=True)
+            print(f"    TIMEOUT", flush=True)
             return float('inf')
             
     elif algo_name == "fsg":
@@ -34,7 +34,7 @@ def run_algorithm(algo_name, executable, input_file, support_percent, output_dir
         try:
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
         except subprocess.TimeoutExpired:
-            print(f"    TIMEOUT: FSG exceeded 5 minutes", flush=True)
+            print(f"    TIMEOUT", flush=True)
             return float('inf')
 
     # elif algo_name == "gaston":
@@ -76,7 +76,7 @@ def run_algorithm(algo_name, executable, input_file, support_percent, output_dir
 def main():
 
     if len(sys.argv) != 6:
-        print("Usage: python3 run_q2.py <gspan_exe> <fsg_exe> <gaston_exe> <dataset> <output_dir>", flush=True)
+        print("Usage command: python3 run_q2.py <gspan_exe> <fsg_exe> <gaston_exe> <dataset> <output_dir>", flush=True)
         sys.exit(1)
     
     gspan_exe = sys.argv[1]
@@ -87,7 +87,7 @@ def main():
 
     
     if not os.path.exists(dataset):
-        print(f"\nERROR: Dataset file '{dataset}' not found!", flush=True)
+        print(f"\n Dataset file '{dataset}' not found!", flush=True)
         sys.exit(1)
     
     os.makedirs(output_dir, exist_ok=True)
@@ -146,16 +146,14 @@ def main():
         
         results.append(row)
         
-        print(f"\n✓ Completed support level {sup}%", flush=True)
+        print(f"\n Completed support level {sup}%", flush=True)
         gspan_str = "TIMEOUT" if gspan_time == float('inf') else f"{gspan_time:.2f}s"
         fsg_str = "TIMEOUT" if fsg_time == float('inf') else f"{fsg_time:.2f}s"
         gaston_str = "TIMEOUT" if gaston_time == float('inf') else f"{gaston_time:.2f}s"
         
-        print(f"  Times: gSpan={gspan_str}, FSG={fsg_str}, Gaston={gaston_str}", flush=True)
     
     
     csv_file = os.path.join(output_dir, "results.csv")
-    print(f"\nSaving results to CSV: {csv_file}", flush=True)
     
     with open(csv_file, 'w') as f:
         writer = csv.DictWriter(f, fieldnames=["sup", "gspan", "fsg", "gaston"])
@@ -174,10 +172,9 @@ def main():
     )
     
     if plot_result.returncode == 0:
-        print(f"✓ Plot saved to: {output_dir}/plot.png", flush=True)
+        print(f" Plot saved to: {output_dir}/plot.png", flush=True)
     else:
-        print(f"✗ Plot generation failed!", flush=True)
-        print(f"Error: {plot_result.stderr}", flush=True)
+        print(f" Plot generation failed!", flush=True)
 
     
     print(f"\nOutput files in '{output_dir}':", flush=True)
