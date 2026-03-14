@@ -10,7 +10,17 @@ def load_data(source):
     if source.endswith('.npy'):
         return np.load(source)
     
-    url = f"http://10.208.23.248:3000/dataset?student_id={MY_ID}&dataset_num={source}"
+    if source.endswith('.json'):
+        try:
+            with open(source, 'r') as f:
+                content = json.load(f)
+                return np.array(content["X"])
+        except Exception as e:
+            print(f"error")
+            sys.exit(1)
+    
+    # url = f"http://10.208.23.248:3000/dataset?student_id={MY_ID}&dataset_num={source}"
+    url = f"http://hulk.cse.iitd.ac.in:3000/dataset?student_id={MY_ID}&dataset_num={source}"
     try:
         with urllib.request.urlopen(url) as r:
             raw = r.read().decode('utf-8')
@@ -53,7 +63,7 @@ def main():
         return
         
     X = load_data(sys.argv[1])
-    print({X.shape})
+    # print({X.shape})
     # print(X[:5])
     
     ks = range(1, 16) 
@@ -80,3 +90,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
