@@ -1,14 +1,3 @@
-"""
-forest_fire.py — Route Blocking for Reducing Forest Fire Spread
-COL761 Assignment 2, Q2
-
-Algorithm: CELF (Cost-Effective Lazy Forward) greedy on the submodular
-           influence-reduction objective.
-
-Usage:
-    python3 forest_fire.py <graph> <seed_set> <output> <k> <n_sim> <hops>
-"""
-
 import sys
 import os
 import heapq
@@ -19,15 +8,6 @@ from collections import defaultdict, deque
 # ── I/O helpers ────────────────────────────────────────────────────────────────
 
 def load_graph(path):
-    """
-    Return (adj, edges, probs):
-        adj   : dict  u -> list of (v, prob)
-        edges : list of (u, v)
-        probs : dict (u,v) -> prob
-    Supports two formats:
-        u v prob      (3-column, prob ∈ (0,1])
-        u v           (2-column, prob = 1.0)
-    """
     adj   = defaultdict(list)
     edges = []
     probs = {}
@@ -67,11 +47,6 @@ def write_output(path, routes):
 # ── Fire simulation ─────────────────────────────────────────────────────────────
 
 def simulate_once(adj, seeds, blocked_set, hops, probs):
-    """
-    One IC-model simulation. Returns number of burned nodes.
-    blocked_set : set of (u,v) tuples.
-    hops        : max hop distance from seeds (-1 = unlimited).
-    """
     burned    = set(seeds)
     queue     = deque(seeds)
     hop_dist  = {s: 0 for s in seeds}   # only used when hops != -1
@@ -97,7 +72,6 @@ def simulate_once(adj, seeds, blocked_set, hops, probs):
 
 
 def estimate_sigma(adj, seeds, blocked_set, hops, probs, n_sim):
-    """Monte-Carlo estimate of E[|A_inf|]."""
     total = 0
     for _ in range(n_sim):
         total += simulate_once(adj, seeds, blocked_set, hops, probs)
@@ -106,16 +80,12 @@ def estimate_sigma(adj, seeds, blocked_set, hops, probs, n_sim):
 # ── CELF greedy ─────────────────────────────────────────────────────────────────
 
 def celf_greedy(adj, edges, probs, seeds, k, n_sim, hops, output_path):
-    """
-    CELF (lazy greedy) maximisation of f(R) = sigma(∅) - sigma(R).
-    Writes partial results to output_path after each selection.
-    """
     blocked = set()
     selected = []
 
     # Compute baseline
     sigma_empty = estimate_sigma(adj, seeds, blocked, hops, probs, n_sim)
-    print(f"[INFO] σ(∅) = {sigma_empty:.4f}", flush=True)
+    print(f"[INFO] sigma(null) = {sigma_empty:.4f}", flush=True)
 
     # --- Initial marginal gain priority queue (max-heap via negation) ---
     # heap entries: (-gain, edge, iteration_added)
@@ -123,9 +93,6 @@ def celf_greedy(adj, edges, probs, seeds, k, n_sim, hops, output_path):
     current_sigma = sigma_empty
 
     # Warm-start: compute gain for every candidate edge
-    # To save time we use a smaller n_sim for the first pass if |edges| is large
-    # n_sim_init = max(10, min(n_sim, 200_000 // max(len(edges), 1)))
-    # n_sim_init = max(n_sim_init, 5)
     n_sim_init = n_sim
 
     print(f"[INFO] |E|={len(edges)}, init sims={n_sim_init}, full sims={n_sim}", flush=True)
@@ -157,8 +124,8 @@ def celf_greedy(adj, edges, probs, seeds, k, n_sim, hops, output_path):
         iteration += 1
         current_sigma = estimate_sigma(adj, seeds, blocked, hops, probs, n_sim)
         print(
-            f"[{iteration}/{k}] blocked ({u},{v}), gain≈{-neg_gain:.4f}, "
-            f"σ(R)≈{current_sigma:.4f}",
+            f"[{iteration}/{k}] blocked ({u},{v}), gain={-neg_gain:.4f}, "
+            f"sigma(R)={current_sigma:.4f}",
             flush=True
         )
 
@@ -166,7 +133,7 @@ def celf_greedy(adj, edges, probs, seeds, k, n_sim, hops, output_path):
         write_output(output_path, selected)
 
     reduction = (sigma_empty - current_sigma) / sigma_empty if sigma_empty > 0 else 0
-    print(f"[INFO] Final σ(R)={current_sigma:.4f}, reduction ratio={reduction:.4f}", flush=True)
+    print(f"[INFO] Final sigma(R)={current_sigma:.4f}, reduction ratio={reduction:.4f}", flush=True)
     return selected
 
 # ── Entry point ─────────────────────────────────────────────────────────────────
@@ -202,10 +169,6 @@ def main():
 
 
 def prefilter_edges(adj, edges, seeds, hops):
-    """
-    Keep only edges (u,v) such that u is reachable from seeds within hops.
-    These are the only edges that can ever carry fire.
-    """
     if hops == -1:
         reachable = bfs_reachable(adj, seeds, limit=None)
     else:
@@ -215,7 +178,6 @@ def prefilter_edges(adj, edges, seeds, hops):
 
 
 def bfs_reachable(adj, seeds, limit):
-    """BFS up to `limit` hops. limit=None means unlimited."""
     visited = set(seeds)
     queue   = deque((s, 0) for s in seeds)
     while queue:
