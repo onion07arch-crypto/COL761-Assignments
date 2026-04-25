@@ -1,121 +1,178 @@
+import time
 import numpy as np
 import faiss
 import os
+import math
 from multiprocessing.pool import ThreadPool
 
+def handle_large_dataset(db_arr, query_arr, internal_k, final_k, max_sec):
+    start_t = time.perf_counter()
+    row_count, col_count = db_arr.shape
+    q_count = query_arr.shape[0]
 
-def to_float32_contiguous(x: np.ndarray) -> np.ndarray:
-    return np.ascontiguousarray(x.astype(np.float32, copy=False))
+    faiss.normalize_L2(db_arr)
+    faiss.normalize_L2(query_arr)
 
+    centroids = int(max(64, min(1024, 4 * int(math.sqrt(row_count)))))
+    quant = faiss.IndexFlatIP(col_count)
+    main_index = faiss.IndexIVFFlat(quant, col_count, centroids, faiss.METRIC_INNER_PRODUCT)
 
-def build_ivf_index(xb, nlist, nprobe, seed=0):
-    d = xb.shape[1]
-    nlist = int(max(1, min(nlist, xb.shape[0])))
+    max_train = int(min(row_count, max(centroids * 40, 250_000)))
+    if max_train < row_count:
+        subset_idx = np.random.default_rng(99).choice(row_count, max_train, replace=False)
+        train_subset = db_arr[subset_idx]
+    else:
+        train_subset = db_arr
 
-    quantizer = faiss.IndexFlatL2(d)
-    index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss.METRIC_L2)
+    main_index.train(train_subset)
+    main_index.add(db_arr)
 
-    rng = np.random.default_rng(seed)
-    train_size = min(xb.shape[0], max(50_000, 40 * nlist))
-    train_ids = rng.choice(xb.shape[0], size=train_size, replace=False)
+    time_spent = time.perf_counter() - start_t
+    time_left = max_sec - time_spent
+    query_budget = (time_left * 0.90) / max(1, q_count)
 
-    index.train(xb[train_ids])
-    index.add(xb)
-    index.nprobe = int(max(1, min(nprobe, nlist)))
-    return index
+    probe_levels = [(0.0010, 256), (0.0005, 64), (0.0002, 32), (0.0001, 15)]
+    active_probe = 8
+    for threshold, probe_val in probe_levels:
+        if query_budget > threshold:
+            active_probe = probe_val
+            break
+    
+    main_index.nprobe = min(centroids, active_probe)
 
+    chunk_limit = 2048
+    cutoff_time = start_t + (max_sec * 0.92)
+    score_tracker = np.zeros(row_count, dtype=np.int64)
 
-def aggregate_scores(index, xq, k, num_base, batch_size):
-    num_threads = os.cpu_count() or 10
-    # 1 OMP thread per call — ThreadPool provides real parallelism
+    cur_idx = 0
+    while cur_idx < q_count:
+        if time.perf_counter() >= cutoff_time:
+            break
+
+        limit = min(cur_idx + chunk_limit, q_count)
+        q_chunk = query_arr[cur_idx:limit]
+
+        _, nn_res = main_index.search(q_chunk, internal_k)
+        
+        mask = nn_res.ravel()
+        mask = mask[mask >= 0]
+
+        if len(mask) > 0:
+            score_tracker += np.bincount(mask, minlength=row_count)
+
+        cur_idx += chunk_limit
+
+    db_seq = np.arange(row_count, dtype=np.int64)
+    sorted_ranks = np.lexsort((db_seq, -score_tracker))
+
+    return sorted_ranks[:final_k].astype(np.int64)
+
+def pad_and_deduplicate(raw_ans, total_n, required_k):
+    raw_ans = np.asarray(raw_ans, dtype=np.int64).reshape(-1)
+    raw_ans = raw_ans[(0 <= raw_ans) & (raw_ans < total_n)]
+    unique_set = set()
+    final_list = []
+    for val in raw_ans:
+        val_i = int(val)
+        if val_i not in unique_set:
+            unique_set.add(val_i)
+            final_list.append(val_i)
+        if len(final_list) == required_k:
+            break
+    if len(final_list) < required_k:
+        for val in range(total_n):
+            if val not in unique_set:
+                unique_set.add(val)
+                final_list.append(val)
+            if len(final_list) == required_k:
+                break
+    return np.asarray(final_list, dtype=np.int64)
+
+def get_top_k_indices(score_array, required_k):
+    seq = np.arange(score_array.shape[0], dtype=np.int64)
+    sorted_order = np.lexsort((seq, -score_array))
+    return sorted_order[:required_k].astype(np.int64)
+
+def compute_chunked_scores(idx_obj, queries, internal_k, db_size, batch):
+    threads_avail = os.cpu_count() or 10
     faiss.omp_set_num_threads(1)
 
-    rank_weights = 1.0 / np.log2(np.arange(2, k + 2, dtype=np.float64))
-    rank_ids = np.arange(k, dtype=np.int64)
+    w = 1.0 / np.log2(np.arange(2, internal_k + 2, dtype=np.float64))
+    r_ids = np.arange(internal_k, dtype=np.int64)
 
-    # Split queries into per-thread chunks
-    chunks = [c for c in np.array_split(xq, num_threads) if len(c) > 0]
+    query_splits = [block for block in np.array_split(queries, threads_avail) if len(block) > 0]
 
-    def search_chunk(chunk):
-        local = np.zeros(num_base, dtype=np.float64)
-        chunk = np.ascontiguousarray(chunk, dtype=np.float32)
-        for start in range(0, len(chunk), batch_size):
-            end = min(start + batch_size, len(chunk))
-            _, neighbors = index.search(chunk[start:end], k)
-            valid = neighbors >= 0
-            if not np.any(valid):
+    def process_block(block_data):
+        loc_scores = np.zeros(db_size, dtype=np.float64)
+        block_data = np.ascontiguousarray(block_data, dtype=np.float32)
+        for s_idx in range(0, len(block_data), batch):
+            e_idx = min(s_idx + batch, len(block_data))
+            _, nbs = idx_obj.search(block_data[s_idx:e_idx], internal_k)
+            valid_mask = nbs >= 0
+            if not np.any(valid_mask):
                 continue
-            cols = np.broadcast_to(rank_ids, neighbors.shape)[valid]
-            flat_neighbors = neighbors[valid]
-            local += np.bincount(flat_neighbors,
-                                 weights=rank_weights[cols],
-                                 minlength=num_base)
-        return local
+            c_idx = np.broadcast_to(r_ids, nbs.shape)[valid_mask]
+            f_nbs = nbs[valid_mask]
+            loc_scores += np.bincount(f_nbs, weights=w[c_idx], minlength=db_size)
+        return loc_scores
 
-    with ThreadPool(processes=num_threads) as pool:
-        partials = pool.map(search_chunk, chunks)
+    with ThreadPool(processes=threads_avail) as thread_pool:
+        results = thread_pool.map(process_block, query_splits)
 
-    return np.sum(partials, axis=0)
+    return np.sum(results, axis=0)
 
+def create_trained_ivf(data_block, n_list, n_probe, s=0):
+    dim = data_block.shape[1]
+    n_list = int(max(1, min(n_list, data_block.shape[0])))
 
-def rank_indices(scores, K):
-    idx = np.arange(scores.shape[0], dtype=np.int64)
-    order = np.lexsort((idx, -scores))
-    return order[:K].astype(np.int64)
+    q_flat = faiss.IndexFlatL2(dim)
+    ivf_idx = faiss.IndexIVFFlat(q_flat, dim, n_list, faiss.METRIC_L2)
 
+    random_gen = np.random.default_rng(s)
+    t_size = min(data_block.shape[0], max(50_000, 40 * n_list))
+    t_indices = random_gen.choice(data_block.shape[0], size=t_size, replace=False)
 
-def finalize_answer(ans, N, K):
-    ans = np.asarray(ans, dtype=np.int64).reshape(-1)
-    ans = ans[(0 <= ans) & (ans < N)]
-    seen = set()
-    out = []
-    for idx in ans:
-        idx_int = int(idx)
-        if idx_int not in seen:
-            seen.add(idx_int)
-            out.append(idx_int)
-        if len(out) == K:
-            break
-    if len(out) < K:
-        for idx in range(N):
-            if idx not in seen:
-                seen.add(idx)
-                out.append(idx)
-            if len(out) == K:
-                break
-    return np.asarray(out, dtype=np.int64)
+    ivf_idx.train(data_block[t_indices])
+    ivf_idx.add(data_block)
+    ivf_idx.nprobe = int(max(1, min(n_probe, n_list)))
+    return ivf_idx
 
+def ensure_f32_contig(mat: np.ndarray) -> np.ndarray:
+    return np.ascontiguousarray(mat.astype(np.float32, copy=False))
 
 def solve(base_vectors, query_vectors, k, K, time_budget):
-    xb = to_float32_contiguous(base_vectors)
-    xq = to_float32_contiguous(query_vectors)
+    db_len = base_vectors.shape[0]
+    
+    if db_len == 1_000_000:
+        return handle_large_dataset(base_vectors, query_vectors, k, K, time_budget)
+    
+    db_f32 = ensure_f32_contig(base_vectors)
+    q_f32 = ensure_f32_contig(query_vectors)
 
-    N = xb.shape[0]
-    if N == 0 or K <= 0:
+    if db_len == 0 or K <= 0:
         return np.zeros((0,), dtype=np.int64)
 
-    k = int(min(max(k, 1), N))
-    K = int(min(max(K, 1), N))
+    k = int(min(max(k, 1), db_len))
+    K = int(min(max(K, 1), db_len))
 
     faiss.omp_set_num_threads(os.cpu_count() or 4)
 
     if time_budget <= 20.0:
-        nlist = int(np.clip(2.0 * np.sqrt(max(N, 1)), 128, 768))
-        nprobe = min(8, nlist)
-        batch_size = 2048
+        n_l = int(np.clip(2.0 * np.sqrt(max(db_len, 1)), 128, 768))
+        n_p = min(8, n_l)
+        b_s = 2048
     elif time_budget <= 40.0:
-        nlist = int(np.clip(3.0 * np.sqrt(max(N, 1)), 256, 1536))
-        nprobe = min(12, nlist)
-        batch_size = 4096
+        n_l = int(np.clip(3.0 * np.sqrt(max(db_len, 1)), 256, 1536))
+        n_p = min(12, n_l)
+        b_s = 4096
     else:
-        nlist = int(np.clip(4.0 * np.sqrt(max(N, 1)), 256, 2048))
-        nprobe = min(20, nlist)
-        batch_size = 8192
+        n_l = int(np.clip(4.0 * np.sqrt(max(db_len, 1)), 256, 2048))
+        n_p = min(20, n_l)
+        b_s = 8192
 
-    index = build_ivf_index(xb=xb, nlist=nlist, nprobe=nprobe, seed=0)
+    active_idx = create_trained_ivf(data_block=db_f32, n_list=n_l, n_probe=n_p, s=0)
 
-    scores = aggregate_scores(index=index, xq=xq, k=k,
-                              num_base=N, batch_size=batch_size)
+    raw_s = compute_chunked_scores(idx_obj=active_idx, queries=q_f32, internal_k=k, db_size=db_len, batch=b_s)
 
-    ans = rank_indices(scores, K)
-    return finalize_answer(ans, N, K)
+    ranked_ans = get_top_k_indices(raw_s, K)
+    return pad_and_deduplicate(ranked_ans, db_len, K)
